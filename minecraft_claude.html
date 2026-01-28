@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minecraft Clone - Complete</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+        }
+        #instructions.hidden { display: none; }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            font-size: 14px;
+        }
+        #hotbar {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 5px;
+        }
+        .hotbar-slot {
+            width: 50px;
+            height: 50px;
+            background: rgba(0,0,0,0.5);
+            border: 2px solid #888;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            text-align: center;
+        }
+        .hotbar-slot.active {
+            border-color: white;
+            background: rgba(255,255,255,0.2);
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+        }
+        #crosshair::before,
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            background: white;
+        }
+        #crosshair::before {
+            top: 50%;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            transform: translateY(-50%);
+        }
+        #crosshair::after {
+            left: 50%;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            transform: translateX(-50%);
+        }
+    </style>
+</head>
+<body>
+    <div id="instructions">
+        <h2>Minecraft Clone</h2>
+        <p>WASD - Move | Space - Jump | Mouse - Look</p>
+        <p>Left Click - Break | Right Click - Place</p>
+        <p>1, 2, 3 - Select block type</p>
+        <p><strong>Click to start</strong></p>
+    </div>
+    <div id="ui">
+        <div id="fps">FPS: 0</div>
+        <div id="time">Time: Day</div>
+    </div>
+    <div id="crosshair"></div>
+    <div id="hotbar">
+        <div class="hotbar-slot active" data-slot="0">Grass<br>[1]</div>
+        <div class="hotbar-slot" data-slot="1">Dirt<br>[2]</div>
+        <div class="hotbar-slot" data-slot="2">Stone<br>[3]</div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // === CONFIGURATION ===
+        const WORLD_WIDTH = 32;
+        const WORLD_HEIGHT = 16;
+        const WORLD_DEPTH = 32;
+        const BLOCK_SIZE = 1;
+        const PLAYER_HEIGHT = 1.7;
+        const PLAYER_RADIUS = 0.3;
+        const MOVE_SPEED = 4.0;
+        const JUMP_VELOCITY = 7.0;
+        const GRAVITY = 20.0;
+        const REACH_DISTANCE = 5.0;
+
+        // === WORLD DATA ===
+        const world = new Array(WORLD_WIDTH);
+        for (let x = 0; x < WORLD_WIDTH; x++) {
+            world[x] = new Array(WORLD_HEIGHT);
+            for (let y = 0; y < WORLD_HEIGHT; y++) {
+                world[x][y] = new Array(WORLD_DEPTH).fill(0);
+            }
+        }
+
+        // === SIMPLE NOISE FUNCTION ===
+        function noise2D(x, z, seed = 0) {
+            const n = Math.sin(x * 12.9898 + z * 78.233 + seed) * 43758.5453;
+            return n - Math.floor(n);
+        }
+
+        // === WORLD GENERATION WITH TERRAIN ===
+        function generateWorld() {
+            for (let x = 0; x < WORLD_WIDTH; x++) {
+                for (let z = 0; z < WORLD_DEPTH; z++) {
+                    // Generate height using simple noise
+                    const height = Math.floor(
+                        4 + 
+                        noise2D(x * 0.1, z * 0.1, 1) * 3 + 
+                        noise2D(x * 0.05, z * 0.05, 2) * 2
+                    );
+                    
+                    for (let y = 0; y <= height; y++) {
+                        if (y === height) {
+                            world[x][y][z] = 1; // Grass
+                        } else if (y >= height - 3) {
+                            world[x][y][z] = 2; // Dirt
+                        } else {
+                            world[x][y][z] = 3; // Stone
+                        }
+                    }
+                }
+            }
+        }
+
+        // === THREE.JS SETUP ===
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // === LIGHTING (DAY/NIGHT CYCLE) ===
+        let timeOfDay = 0; // 0 to 1 (0=noon, 0.5=midnight, 1=noon again)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
+        scene.add(directionalLight);
+
+        function updateLighting() {
+            // Cycle through day/night
+            const dayProgress = Math.abs(timeOfDay * 2 - 1); // 0 at night, 1 at day
+            
+            // Sky color
+            const skyDay = new THREE.Color(0x87CEEB);
+            const skyNight = new THREE.Color(0x191970);
+            scene.background = skyDay.clone().lerp(skyNight, 1 - dayProgress);
+            
+            // Light intensity
+            ambientLight.intensity = 0.3 + dayProgress * 0.4;
+            directionalLight.intensity = dayProgress * 0.5;
+            
+            // Sun position
+            const angle = timeOfDay * Math.PI * 2;
+            directionalLight.position.set(Math.cos(angle), Math.sin(angle), 0.5);
+        }
+
+        // === MATERIALS ===
+        const materials = {
+            grass: new THREE.MeshLambertMaterial({ color: 0x4CAF50 }),
+            dirt: new THREE.MeshLambertMaterial({ color: 0x8B4513 }),
+            stone: new THREE.MeshLambertMaterial({ color: 0x808080 })
+        };
+
+        // === BLOCK MANAGEMENT ===
+        const blockMeshMap = new Map();
+        const blockGeometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+        const outlineGeometry = new THREE.EdgesGeometry(blockGeometry);
+        const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
+        const blockOutline = new THREE.LineSegments(outlineGeometry, outlineMaterial);
+        blockOutline.visible = false;
+        scene.add(blockOutline);
+
+        function getBlockKey(x, y, z) {
+            return `${x},${y},${z}`;
+        }
+
+        function createBlock(x, y, z, blockType) {
+            const material = blockType === 1 ? materials.grass : 
+                           blockType === 2 ? materials.dirt : materials.stone;
+            const mesh = new THREE.Mesh(blockGeometry, material);
+            mesh.position.set(x, y, z);
+            scene.add(mesh);
+            blockMeshMap.set(getBlockKey(x, y, z), mesh);
+        }
+
+        function removeBlock(x, y, z) {
+            const key = getBlockKey(x, y, z);
+            const mesh = blockMeshMap.get(key);
+            if (mesh) {
+                scene.remove(mesh);
+                blockMeshMap.delete(key);
+            }
+        }
+
+        function createWorldMesh() {
+            for (let x = 0; x < WORLD_WIDTH; x++) {
+                for (let y = 0; y < WORLD_HEIGHT; y++) {
+                    for (let z = 0; z < WORLD_DEPTH; z++) {
+                        const blockType = world[x][y][z];
+                        if (blockType !== 0) {
+                            createBlock(x, y, z, blockType);
+                        }
+                    }
+                }
+            }
+        }
+
+        // === PLAYER ===
+        function findSafeSpawnPoint() {
+            const centerX = Math.floor(WORLD_WIDTH / 2);
+            const centerZ = Math.floor(WORLD_DEPTH / 2);
+            
+            for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
+                if (world[centerX][y][centerZ] !== 0) {
+                    return new THREE.Vector3(centerX + 0.5, y + 2, centerZ + 0.5);
+                }
+            }
+            return new THREE.Vector3(centerX, WORLD_HEIGHT / 2, centerZ);
+        }
+
+        const player = {
+            position: findSafeSpawnPoint(),
+            velocity: new THREE.Vector3(0, 0, 0),
+            onGround: false,
+            rotation: { yaw: 0, pitch: 0 },
+            selectedBlock: 1
+        };
+
+        // === INPUT ===
+        const keys = {};
+        const mouse = { locked: false };
+
+        const instructions = document.getElementById('instructions');
+        instructions.addEventListener('click', () => {
+            renderer.domElement.requestPointerLock();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            mouse.locked = document.pointerLockElement === renderer.domElement;
+            instructions.classList.toggle('hidden', mouse.locked);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Digit1') player.selectedBlock = 1;
+            if (e.code === 'Digit2') player.selectedBlock = 2;
+            if (e.code === 'Digit3') player.selectedBlock = 3;
+            updateHotbar();
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!mouse.locked) return;
+            const sensitivity = 0.002;
+            player.rotation.yaw -= e.movementX * sensitivity;
+            player.rotation.pitch -= e.movementY * sensitivity;
+            player.rotation.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, player.rotation.pitch));
+        });
+
+        document.addEventListener('mousedown', (e) => {
+            if (!mouse.locked) return;
+            if (e.button === 0) breakBlock();
+            else if (e.button === 2) placeBlock();
+        });
+
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // === RAYCASTING ===
+        function raycastBlock() {
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            raycaster.far = REACH_DISTANCE;
+            
+            const intersects = raycaster.intersectObjects(Array.from(blockMeshMap.values()));
+            
+            if (intersects.length > 0) {
+                const hit = intersects[0];
+                const point = hit.point;
+                const normal = hit.face.normal;
+                
+                const blockPos = {
+                    x: Math.floor(point.x - normal.x * 0.001),
+                    y: Math.floor(point.y - normal.y * 0.001),
+                    z: Math.floor(point.z - normal.z * 0.001)
+                };
+                
+                const placePos = {
+                    x: blockPos.x + Math.round(normal.x),
+                    y: blockPos.y + Math.round(normal.y),
+                    z: blockPos.z + Math.round(normal.z)
+                };
+                
+                return { block: blockPos, previous: placePos };
+            }
+            
+            return null;
+        }
+
+        // === BLOCK INTERACTION ===
+        function breakBlock() {
+            const target = raycastBlock();
+            if (!target) return;
+            const { x, y, z } = target.block;
+            world[x][y][z] = 0;
+            removeBlock(x, y, z);
+        }
+
+        function placeBlock() {
+            const target = raycastBlock();
+            if (!target) return;
+            const { x, y, z } = target.previous;
+            
+            if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= WORLD_DEPTH) return;
+            if (world[x][y][z] !== 0) return;
+            
+            const blockCenter = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+            const horizontalDist = Math.sqrt(
+                Math.pow(player.position.x - blockCenter.x, 2) + 
+                Math.pow(player.position.z - blockCenter.z, 2)
+            );
+            const verticalDist = Math.abs(player.position.y - blockCenter.y);
+            
+            if (horizontalDist < PLAYER_RADIUS + 0.5 && verticalDist < PLAYER_HEIGHT / 2 + 0.5) return;
+            
+            world[x][y][z] = player.selectedBlock;
+            createBlock(x, y, z, player.selectedBlock);
+        }
+
+        // === COLLISION ===
+        function isBlockSolid(x, y, z) {
+            const bx = Math.floor(x);
+            const by = Math.floor(y);
+            const bz = Math.floor(z);
+            if (bx < 0 || bx >= WORLD_WIDTH || by < 0 || by >= WORLD_HEIGHT || bz < 0 || bz >= WORLD_DEPTH) {
+                return false;
+            }
+            return world[bx][by][bz] !== 0;
+        }
+
+        function checkCollision(pos) {
+            const checks = [
+                { x: 0, z: 0 },
+                { x: PLAYER_RADIUS, z: 0 },
+                { x: -PLAYER_RADIUS, z: 0 },
+                { x: 0, z: PLAYER_RADIUS },
+                { x: 0, z: -PLAYER_RADIUS },
+                { x: PLAYER_RADIUS * 0.7, z: PLAYER_RADIUS * 0.7 },
+                { x: -PLAYER_RADIUS * 0.7, z: PLAYER_RADIUS * 0.7 },
+                { x: PLAYER_RADIUS * 0.7, z: -PLAYER_RADIUS * 0.7 },
+                { x: -PLAYER_RADIUS * 0.7, z: -PLAYER_RADIUS * 0.7 }
+            ];
+
+            for (let heightOffset = 0; heightOffset < PLAYER_HEIGHT; heightOffset += 0.5) {
+                for (const check of checks) {
+                    if (isBlockSolid(pos.x + check.x, pos.y + heightOffset, pos.z + check.z)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // === PHYSICS ===
+        function updatePhysics(deltaTime) {
+            player.velocity.y -= GRAVITY * deltaTime;
+
+            const moveDir = new THREE.Vector3(0, 0, 0);
+            if (keys['KeyW']) moveDir.z = 1;
+            if (keys['KeyS']) moveDir.z = -1;
+            if (keys['KeyA']) moveDir.x = -1;
+            if (keys['KeyD']) moveDir.x = 1;
+
+            if (moveDir.length() > 0) {
+                moveDir.normalize();
+                const cos = Math.cos(player.rotation.yaw);
+                const sin = Math.sin(player.rotation.yaw);
+                player.velocity.x = (moveDir.x * cos - moveDir.z * sin) * MOVE_SPEED;
+                player.velocity.z = (moveDir.x * sin + moveDir.z * cos) * MOVE_SPEED;
+            } else {
+                player.velocity.x = 0;
+                player.velocity.z = 0;
+            }
+
+            if (keys['Space'] && player.onGround) {
+                player.velocity.y = JUMP_VELOCITY;
+            }
+
+            const oldPos = player.position.clone();
+            const newPos = player.position.clone();
+            newPos.x += player.velocity.x * deltaTime;
+            newPos.y += player.velocity.y * deltaTime;
+            newPos.z += player.velocity.z * deltaTime;
+
+            const testX = newPos.clone();
+            testX.y = oldPos.y;
+            testX.z = oldPos.z;
+            if (!checkCollision(testX)) {
+                player.position.x = newPos.x;
+            } else {
+                player.velocity.x = 0;
+            }
+
+            const testY = player.position.clone();
+            testY.y = newPos.y;
+            if (!checkCollision(testY)) {
+                player.position.y = newPos.y;
+                player.onGround = false;
+            } else {
+                if (player.velocity.y < 0) player.onGround = true;
+                player.velocity.y = 0;
+            }
+
+            const testZ = player.position.clone();
+            testZ.z = newPos.z;
+            if (!checkCollision(testZ)) {
+                player.position.z = newPos.z;
+            } else {
+                player.velocity.z = 0;
+            }
+        }
+
+        // === CAMERA ===
+        function updateCamera() {
+            camera.position.copy(player.position);
+            camera.position.y += PLAYER_HEIGHT - 0.2;
+            camera.rotation.order = 'YXZ';
+            camera.rotation.y = player.rotation.yaw;
+            camera.rotation.x = player.rotation.pitch;
+        }
+
+        // === UI ===
+        function updateHotbar() {
+            const slots = document.querySelectorAll('.hotbar-slot');
+            slots.forEach((slot, index) => {
+                slot.classList.toggle('active', player.selectedBlock === index + 1);
+            });
+        }
+
+        let frameCount = 0;
+        let lastFPSUpdate = performance.now();
+
+        function updateUI() {
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFPSUpdate >= 1000) {
+                document.getElementById('fps').textContent = `FPS: ${frameCount}`;
+                frameCount = 0;
+                lastFPSUpdate = now;
+            }
+            
+            const isDay = timeOfDay < 0.25 || timeOfDay > 0.75;
+            document.getElementById('time').textContent = `Time: ${isDay ? 'Day' : 'Night'}`;
+        }
+
+        // === GAME LOOP ===
+        let lastTime = performance.now();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const currentTime = performance.now();
+            const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.1);
+            lastTime = currentTime;
+
+            if (mouse.locked) {
+                updatePhysics(deltaTime);
+                updateCamera();
+                
+                const target = raycastBlock();
+                if (target) {
+                    blockOutline.visible = true;
+                    blockOutline.position.set(target.block.x, target.block.y, target.block.z);
+                } else {
+                    blockOutline.visible = false;
+                }
+            }
+
+            // Day/night cycle (60 second full cycle)
+            timeOfDay = (timeOfDay + deltaTime / 60) % 1;
+            updateLighting();
+            updateUI();
+
+            renderer.render(scene, camera);
+        }
+
+        // === RESIZE ===
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // === INIT ===
+        generateWorld();
+        createWorldMesh();
+        updateHotbar();
+        updateLighting();
+        animate();
+    </script>
+</body>
+</html>
